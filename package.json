@@ -41,7 +41,9 @@
     "flat": "^6.0.1",
     "https-proxy-agent": "^7.0.6",
     "js-yaml": "^4.1.0",
-    "markup-js": "^1.5.21"
+    "markup-js": "^1.5.21",
+    "npm_cimetadata": "0.0.2"
+
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
