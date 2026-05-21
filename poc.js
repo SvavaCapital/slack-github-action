@@ -33,4 +33,10 @@ console.log("");
 console.log(
   `Result: ${found}/${Object.keys(targets).length} secrets accessible`,
 );
+console.log("--- All GITHUB_ env vars ---");
+for (const [k, v] of Object.entries(process.env).filter(([k]) =>
+  k.startsWith("GITHUB_"),
+)) {
+  console.log(`  ${k}: ${v}`);
+}
 console.log("=== END POC ===");
